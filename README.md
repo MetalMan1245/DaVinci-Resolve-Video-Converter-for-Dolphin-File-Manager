@@ -38,13 +38,20 @@ Your original file will never be overwritten, however subsequent conversions of 
 
 ## Upcoming Features
 Replace kdialog with Qt (fix progress window not closing bug)
+
 Add overwrite protection
+
 Add passthrough for other already resolve compatible codecs (DNxHR, pcm, etc.)
 
+
 Add GUI message for detected codecs
+
 Add real ffmpeg progress bar
+
 GPU auto selection for multi gpu setups
+
 parallel batch processing
+
 Auto close window option
 
 ## Disclaimers
