@@ -37,22 +37,23 @@ Multi stream audio is supported, all streams will either be converted to flac or
 Your original file will never be overwritten, however subsequent conversions of the same file may cause overwrites of the previous conversion, see Upcoming Features.
 
 ## Upcoming Features
-Replace kdialog with Qt (fix progress window not closing bug)
+Major:
+`Replace kdialog with Qt (fix progress window not closing bug)`
 
-Add overwrite protection
+`Add passthrough for other already resolve compatible codecs (DNxHR, pcm, etc.)`
 
-Add passthrough for other already resolve compatible codecs (DNxHR, pcm, etc.)
+Minor:
+`Add GUI message for detected codecs`
 
+`Add proper overwrite protection (new filename is good enough but something more robust would be nice)`
 
-Add GUI message for detected codecs
+`Add real ffmpeg progress bar`
 
-Add real ffmpeg progress bar
+`GPU auto selection for multi gpu setups`
 
-GPU auto selection for multi gpu setups
+`parallel batch processing`
 
-parallel batch processing
-
-Auto close window option
+`Auto close window option`
 
 ## Disclaimers
 
