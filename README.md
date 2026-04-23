@@ -46,3 +46,9 @@ Add real ffmpeg progress bar
 GPU auto selection for multi gpu setups
 parallel batch processing
 Auto close window option
+
+## Disclaimers
+
+THIS IS VIBE CODED.  I am not a real programmer and as such AI was used to create this, therefore I do not promise quality, repeatability, or robustness.
+
+That said I use this script myself to convert video from cameras as part of footage ingestion (maybe one day Blackmagic will fix the Linux build and all of this will be unnecessary) and if you think you can do better, feel free to message me here or on my discord `metalman1245` or fork if you would rather create your own project.  Though I personally hate fragmentation, so I would much rather you just get in contact with me and I will add you to this repo so you can push changes yourself.
