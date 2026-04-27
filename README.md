@@ -1,20 +1,22 @@
 # DaVinci Resolve Video Converter for Dolphin File Manager
 
-A small script that converts a video file to a DaVinci Resolve compatible format and container (AV1 with flac audio) with support for passthrough if video or audio is already compatible, and batch conversion.  Includes a .desktop file for context menu integration with KDE Dolphin File Manager.
+A small script that converts a video file to a DaVinci Resolve compatible format and container (AV1 with flac audio in an mkv container) with support for passthrough if video or audio is already compatible, and batch conversion.  Includes a .desktop file for context menu integration with KDE Dolphin File Manager.
 
 ## Dependencies
 
 1. `bash`
 2. `ffmpeg`
 3. `ffprobe` (Comes with ffmpeg)
-4. `kdialog` (KDE Plasma)
-5. `qdbus` (usually included with Qt tools)
+4. `zenity`
 
 ## Install
 
-1. Put `ResolveConvert.sh` in `~/Scripts`
+Double click `resolveconverter-installer.desktop` and run as a program (you can also run `ffmpeg-install_remote-resolve.sh` by itself or `install_uninstall-resolve.sh` in if you installed the entire repo)
+
+For a manual install:
+1. Put `ResolveConvert.sh` in `~/.local/bin`
 2. Put `VideoConverterResolve.desktop` `~/.local/share/kio/servicemenus/`.
-3. `chmod +x ~/Scripts/ResolveConvert.sh`
+3. `chmod +x ~/.local/bin/ResolveConvert.sh`
 4. `chmod +x ~/.local/share/kio/servicemenus/VideoConverterResolve.desktop`
 5. Edit `.desktop` file if you want the script elsewhere.
 6. Feel free to change any part of this to suit your needs.
@@ -23,7 +25,7 @@ A small script that converts a video file to a DaVinci Resolve compatible format
 
 Right-click file in Dolphin -> Convert for Resolve.  You will be prompted to choose Auto (recommended), force VAAPI (fast), or force CPU (SVT-AV1 quality).  Auto will choose VAAPI if it is available and fall back to CPU encoding if not.
 
-You may also run `~/Scripts/ResolveConvert.sh /path/to/your/file` to run the script manually without Dolphin.
+You may also run `~/.local/bin/ResolveConvert.sh /path/to/your/file` to run the script manually without Dolphin.
 
 ## Notes
 
@@ -35,26 +37,12 @@ Batch file conversion is possible, though untested when used on a full folder, o
 
 Multi stream audio is supported, all streams will either be converted to flac or passed through if they are already flac.
 
-Your original file will never be overwritten, however subsequent conversions of the same file may cause overwrites of the previous conversion, see Upcoming Features.
+Your original file will never be overwritten, however subsequent conversions of the same file may cause overwrites of the previous conversion.
 
 ## Upcoming Features
 Major:
-`Replace kdialog with Qt (fix progress window not closing bug)`
 
 `Add passthrough for other already resolve compatible codecs (DNxHR, pcm, etc.)`
-
-Minor:
-`Add GUI message for detected codecs`
-
-`Add proper overwrite protection (new filename is good enough but something more robust would be nice)`
-
-`Add real ffmpeg progress bar`
-
-`GPU auto selection for multi gpu setups`
-
-`parallel batch processing`
-
-`Auto close window option`
 
 ## Disclaimers
 
