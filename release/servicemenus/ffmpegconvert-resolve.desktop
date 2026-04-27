@@ -8,5 +8,5 @@ X-KDE-StartupNotify=false
 
 [Desktop Action ConvertToMKV]
 Name=Convert for Resolve
-Exec=~/Scripts/ResolveConvert.sh %F
+Exec=~/.local/bin/ffmpegconvert-resolve.sh %F
 Icon=/opt/resolve/graphics/DV_Panels.png
