@@ -50,7 +50,9 @@ for input in "$@"; do
       -iname "*.mp4" -o \
       -iname "*.mkv" -o \
       -iname "*.mov" -o \
-      -iname "*.avi" \
+      -iname "*.avi" -o \
+      -iname "*.mts" -o \
+      -iname "*.m2ts" \
     \))
   else
     files+=("$input")
@@ -175,6 +177,7 @@ process_file() {
   ffmpeg_args+=(-map 0:v?)
   ffmpeg_args+=(-map 0:a?)
   ffmpeg_args+=(-map 0:s?)
+  ffmpeg_args+=(-c:s copy)
 
   ########################################
   # VIDEO ENCODE LOGIC
@@ -302,6 +305,7 @@ for file in "${files[@]}"; do
     ffmpeg_args+=(-map 0:v?)
     ffmpeg_args+=(-map 0:a?)
     ffmpeg_args+=(-map 0:s?)
+    ffmpeg_args+=(-c:s copy)
 
     ########################################
     # VIDEO
