@@ -165,17 +165,36 @@ process_file() {
     -show_entries stream=codec_name \
     -of default=nokey=1:noprint_wrappers=1 "$input")
 
+    local ext="${input##*.}"
+    ext="${ext,,}"
+
+    ########################################
+    # IPHONE SLOMO FIXES
+    ########################################
+
+    if [[ "$ext" == "mov" ]]; then
+      ffmpeg_args+=(
+        -vf "setpts=N/FRAME_RATE/TB"
+        -r 30
+      )
+    fi
+
   mapfile -t audio_codecs < <(
     ffprobe -v error -select_streams a \
       -show_entries stream=codec_name \
       -of default=nokey=1:noprint_wrappers=1 "$input"
   )
 
-  ffmpeg_args=(-i "$input")
+  ffmpeg_args=(
+  -fflags +genpts+discardcorrupt
+  -err_detect ignore_err
+  -ignore_editlist 1
+  -i "$input"
+  )
 
   # map only valid streams
   ffmpeg_args+=(-map 0:v?)
-  ffmpeg_args+=(-map 0:a?)
+  # audio streams are added dynamically below
   ffmpeg_args+=(-map 0:s?)
   ffmpeg_args+=(-c:s copy)
 
@@ -188,7 +207,7 @@ process_file() {
 
   else
     if [[ "$MODE" == "cpu" ]]; then
-      ffmpeg_args+=(-c:v libsvtav1 -preset 8 -crf 30)
+      ffmpeg_args+=(-c:v libsvtav1 -preset 8 -crf 28)
 
     elif [[ "$MODE" == "vaapi" ]]; then
       ffmpeg_args+=(
@@ -209,7 +228,7 @@ process_file() {
           -qp 20
         )
       else
-        ffmpeg_args+=(-c:v libsvtav1 -preset 6 -crf 24)
+        ffmpeg_args+=(-c:v libsvtav1 -preset 6 -crf 28)
       fi
     fi
   fi
@@ -300,10 +319,15 @@ for file in "${files[@]}"; do
         -of default=nokey=1:noprint_wrappers=1 "$input"
     )
 
-    ffmpeg_args=(-i "$input")
+    ffmpeg_args=(
+    -fflags +genpts+discardcorrupt
+    -err_detect ignore_err
+    -ignore_editlist 1
+    -i "$input"
+    )
 
     ffmpeg_args+=(-map 0:v?)
-    ffmpeg_args+=(-map 0:a?)
+    # audio streams are added dynamically below
     ffmpeg_args+=(-map 0:s?)
     ffmpeg_args+=(-c:s copy)
 
@@ -317,35 +341,65 @@ for file in "${files[@]}"; do
       if [[ "$VAAPI_AV1_AVAILABLE" -eq 1 ]]; then
         ffmpeg_args+=(
           -vaapi_device /dev/dri/renderD128
-          -vf format=nv12,hwupload
+          -vf "setpts=N/FRAME_RATE/TB,format=nv12,hwupload"
           -c:v av1_vaapi
           -rc_mode VBR
           -qp 20
         )
       else
-        ffmpeg_args+=(-c:v libsvtav1 -preset 6 -crf 24)
+        ffmpeg_args+=(-c:v libsvtav1 -preset 6 -crf 28)
       fi
     fi
 
     ########################################
-    # AUDIO
+    # AUDIO HANDLING (SAFE DETECTION)
     ########################################
 
-    audio_index=0
-    for codec in "${audio_codecs[@]}"; do
-      stream="a:${audio_index}"
+    unsupported_streams=()
 
-      case "$codec" in
-        flac|pcm*|alac)
-          ffmpeg_args+=(-c:$stream copy)
-          ;;
-        *)
-          ffmpeg_args+=(-c:$stream flac -compression_level 5)
-          ;;
-      esac
+    audio_stream_count=$(ffprobe -v error \
+      -select_streams a \
+      -show_entries stream=index \
+      -of csv=p=0 "$input" | wc -l)
 
-      ((audio_index++))
+    for ((i=0; i<audio_stream_count; i++)); do
+
+      codec=$(ffprobe -v error \
+        -select_streams a:$i \
+        -show_entries stream=codec_name \
+        -of default=nokey=1:noprint_wrappers=1 \
+        "$input")
+
+      debug "Audio stream $i codec=$codec"
+
+      ########################################
+      # TEST WHETHER FFMPEG CAN DECODE IT
+      ########################################
+
+      if ffmpeg -v error \
+          -t 0.1 \
+          -i "$input" \
+          -map 0:a:$i \
+          -f null - >/dev/null 2>&1; then
+
+        debug "Audio stream $i supported"
+
+        ffmpeg_args+=(-map 0:a:$i)
+
+      else
+
+        debug "Audio stream $i UNSUPPORTED"
+
+        unsupported_streams+=("Audio stream $i ($codec)")
+      fi
     done
+
+    ########################################
+    # AUDIO ENCODING
+    ########################################
+
+    ffmpeg_args+=(-c:a flac)
+    ffmpeg_args+=(-compression_level 5)
   }
 
   process_file_build_only "$file"
@@ -390,6 +444,23 @@ for file in "${files[@]}"; do
 
   wait "$FFMPEG_PID"
   status=$?
+
+  ########################################
+  # WARN ABOUT SKIPPED STREAMS
+  ########################################
+
+  if [[ ${#unsupported_streams[@]} -gt 0 ]]; then
+
+    warning_text="Some unsupported audio streams were skipped:\n\n"
+
+    for s in "${unsupported_streams[@]}"; do
+      warning_text+="$s\n"
+    done
+
+    zenity --warning \
+      --title="Unsupported Streams Skipped" \
+      --text="$warning_text"
+  fi
 
   if [[ $status -ne 0 ]]; then
     any_failed=1
