@@ -9,8 +9,6 @@ debug() {
   fi
 }
 
-MODE="auto"
-
 if [[ $# -lt 1 ]]; then
   zenity --error --text="Usage: $0 <file-or-directory> [more files/dirs...]"
   exit 1
@@ -50,123 +48,14 @@ for input in "$@"; do
       -iname "*.mp4" -o \
       -iname "*.mkv" -o \
       -iname "*.mov" -o \
-      -iname "*.avi" \
-    \))
+      -iname "*.avi" -o \
+      -iname "*.mts" -o \
+      -iname "*.m2ts" \
+    \) ! -iname "*_resolve.mkv")
   else
     files+=("$input")
   fi
 done
-
-########################################
-# DETECT IF STREAM IS "UNUSUAL"
-########################################
-
-is_unusual_stream() {
-  local input="$1"
-  local stream_index="$2"
-
-  # Get codec for this specific stream
-  local codec=$(ffprobe -v error -select_streams "v:${stream_index}" \
-    -show_entries stream=codec_name \
-    -of default=nokey=1:noprint_wrappers=1 "$input")
-
-  debug "Stream v:$stream_index codec=$codec"
-
-  # Only mark MJPEG as unusual (these are typically attached pictures/thumbnails)
-  if [[ "$codec" == "mjpeg" ]]; then
-    return 0  # is unusual
-  fi
-
-  return 1  # is normal
-}
-
-########################################
-# RUN WITH PROGRESS (FIFO VERSION)
-########################################
-
-run_with_progress() {
-  local title="$1"
-  local output_file="$2"
-  shift 2
-
-  local cmd=("$@")
-
-  ########################################
-  # FIFO SETUP (CRITICAL FIX)
-  ########################################
-
-  FIFO=$(mktemp -u)
-  mkfifo "$FIFO"
-
-  zenity --progress \
-    --title="$title" \
-    --auto-close \
-    --cancel-label="Cancel" \
-    --text="Converting..." \
-    < "$FIFO" &
-
-  ZENITY_PID=$!
-  exec 3> "$FIFO"
-  rm -f "$FIFO"
-
-  debug "Zenity PID=$ZENITY_PID"
-
-  ########################################
-  # RUN FFMPEG
-  ########################################
-
-  # run ffmpeg and capture REAL pid
-  "${cmd[@]}" > >(tee -a "$DEBUG_LOG") 2>&1 &
-  ffmpeg_pid=$!
-
-  debug "ffmpeg PID=$ffmpeg_pid"
-
-  ########################################
-  # MONITOR LOOP
-  ########################################
-
-  while kill -0 "$ffmpeg_pid" 2>/dev/null; do
-
-    # CANCEL DETECTED
-    if ! kill -0 "$ZENITY_PID" 2>/dev/null; then
-      debug "Cancel detected"
-
-      kill -TERM "$ffmpeg_pid" 2>/dev/null
-      sleep 0.2
-      kill -KILL "$ffmpeg_pid" 2>/dev/null
-      wait "$ffmpeg_pid" 2>/dev/null
-
-      [[ -f "$output_file" ]] && rm -f "$output_file"
-
-      exec 3>&-
-
-      zenity --warning \
-        --title="Conversion Cancelled" \
-        --text="The conversion was cancelled and partial output was removed."
-
-      return 1
-    fi
-
-    echo "# Converting..." >&3
-    sleep 0.5
-  done
-
-  wait "$ffmpeg_pid"
-  local exit_code=$?
-
-  exec 3>&-
-  wait "$ZENITY_PID" 2>/dev/null
-
-  if [[ "$exit_code" -eq 0 ]]; then
-    zenity --info --title="Complete" --text="Conversion Complete!"
-    return 0
-  else
-    [[ -f "$output_file" ]] && rm -f "$output_file"
-
-    zenity --error --title="Error" --text="Conversion failed or was interrupted."
-    return 1
-  fi
-}
 
 ########################################
 # PROCESS FILE (BUILD FFMPEG ARGS)
@@ -175,93 +64,87 @@ run_with_progress() {
 process_file_build_only() {
   local input="$1"
 
-  # Get main video codec
-  local video_codec=$(ffprobe -v error -select_streams v:0 \
-    -show_entries stream=codec_name \
-    -of default=nokey=1:noprint_wrappers=1 "$input")
+  local -A st_type=() st_name=()
+  local -a idx_list=()
 
-  # Get all audio codecs
-  mapfile -t audio_codecs < <(
-    ffprobe -v error -select_streams a \
-      -show_entries stream=codec_name \
-      -of default=nokey=1:noprint_wrappers=1 "$input"
-  )
+  # One authoritative dump, filtered to top-level streams only
+  local line key val idx
+  while IFS= read -r line; do
+    [[ "$line" == *=* ]] || continue
+    key="${line%%=*}"
+    val="${line#*=}"
+    val="${val%\"}"; val="${val#\"}"   # strip flat-format quotes
+    case "$key" in
+      streams.stream.*.codec_type)
+        idx="${key#streams.stream.}"
+        idx="${idx%.codec_type}"
+        st_type[$idx]="$val"
+        idx_list+=("$idx")
+        ;;
+      streams.stream.*.codec_name)
+        idx="${key#streams.stream.}"
+        idx="${idx%.codec_name}"
+        st_name[$idx]="$val"
+        ;;
+      *) ;;   # skips programs.program.* and stream_groups.* entirely
+    esac
+  done < <(ffprobe -v error -of flat -show_entries stream=index,codec_type,codec_name "$input")
 
-  # Count total video streams
-  local video_stream_count=$(ffprobe -v error -select_streams v \
-    -show_entries stream=index \
-    -of default=nokey=1:noprint_wrappers=1 "$input" | wc -l)
+  # Walk streams in ascending index order
+  local video_indices=() video_codecs=()
+  local audio_indices=() audio_codecs=()
+  local idx sorted
+  while IFS= read -r idx; do
+    [[ -z "$idx" ]] && continue
+    case "${st_type[$idx]}" in
+      video)
+        [[ -z "${st_name[$idx]}" ]] && continue   # tmcd / data pseudo-streams
+        video_indices+=("$idx")
+        video_codecs+=("${st_name[$idx]}")
+        ;;
+      audio)
+        audio_indices+=("$idx")
+        audio_codecs+=("${st_name[$idx]}")
+        ;;
+    esac
+  done < <(printf '%s\n' "${idx_list[@]}" | sort -n)
+
+  debug "video: ${video_codecs[*]:-none} @ ${video_indices[*]:-none}"
+  debug "audio: ${audio_codecs[*]:-none} @ ${audio_indices[*]:-none}"
 
   ffmpeg_args=(-i "$input")
 
-  ########################################
-  # MAP STREAMS (EXPLICIT)
-  ########################################
-
-  # Map video streams individually with smart codec selection
-  for ((i = 0; i < video_stream_count; i++)); do
-    ffmpeg_args+=(-map "0:v:$i")
+  for idx in "${video_indices[@]}"; do
+    ffmpeg_args+=(-map "0:$idx")
   done
+  ffmpeg_args+=(-map 0:a? -map 0:s? -c:s copy)
 
-  # Map audio streams
-  ffmpeg_args+=(-map 0:a?)
-
-  # Map subtitle streams
-  ffmpeg_args+=(-map 0:s?)
-
-  ########################################
-  # VIDEO CODEC LOGIC (PER STREAM)
-  ########################################
-
-  # Process each video stream
-  for ((i = 0; i < video_stream_count; i++)); do
-    if is_unusual_stream "$input" "$i"; then
-      debug "Stream v:$i is unusual - copying without encoding"
-      ffmpeg_args+=(-c:v:$i copy)
+  local o=0 codec
+  for codec in "${video_codecs[@]}"; do
+    if [[ "$codec" == "mjpeg" || "$codec" == "png" || "$codec" == "av1" ]]; then
+      debug "Output v:$o ($codec) - passthrough"
+      ffmpeg_args+=(-c:v:$o copy)
+    elif [[ "$VAAPI_AV1_AVAILABLE" -eq 1 && $o -eq 0 ]]; then
+      ffmpeg_args+=(
+        -vaapi_device /dev/dri/renderD128
+        -filter:v:0 format=nv12,hwupload
+        -c:v:$o av1_vaapi
+        -rc_mode VBR
+        -qp 20
+      )
     else
-      # Normal stream - apply encoding logic
-      if [[ "$video_codec" == "av1" ]]; then
-        ffmpeg_args+=(-c:v:$i copy)
-      else
-        if [[ "$VAAPI_AV1_AVAILABLE" -eq 1 ]]; then
-          # VAAPI logic - need to apply filter only to first stream
-          if [[ $i -eq 0 ]]; then
-            ffmpeg_args+=(
-              -vaapi_device /dev/dri/renderD128
-              -vf format=nv12,hwupload
-              -c:v:$i av1_vaapi
-              -rc_mode VBR
-              -qp 20
-            )
-          else
-            # Subsequent streams: copy or use CPU encoder
-            ffmpeg_args+=(-c:v:$i libsvtav1 -preset 6 -crf 24)
-          fi
-        else
-          ffmpeg_args+=(-c:v:$i libsvtav1 -preset 6 -crf 24)
-        fi
-      fi
+      ffmpeg_args+=(-c:v:$o libsvtav1 -preset 6 -crf 24)
     fi
+    ((o++))
   done
 
-  ########################################
-  # AUDIO HANDLING
-  ########################################
-
-  audio_index=0
+  o=0
   for codec in "${audio_codecs[@]}"; do
-    stream="a:${audio_index}"
-
     case "$codec" in
-      flac|pcm*|alac)
-        ffmpeg_args+=(-c:$stream copy)
-        ;;
-      *)
-        ffmpeg_args+=(-c:$stream flac -compression_level 5)
-        ;;
+      flac|pcm*|alac) ffmpeg_args+=(-c:a:$o copy) ;;
+      *)              ffmpeg_args+=(-c:a:$o flac -compression_level 5) ;;
     esac
-
-    ((audio_index++))
+    ((o++))
   done
 }
 
@@ -295,344 +178,27 @@ for file in "${files[@]}"; do
   current=$((current + 1))
 
   filename=$(basename "$file")
-
   echo "# Converting ($current/$total_files)\n$filename" >&3
 
-  ########################################
-  # BUILD COMMAND
-  ########################################
-
   output="${file%.*}_${file##*.}_resolve.mkv"
+
+  if [[ -e "$output" ]]; then
+    debug "Skipping (exists): $output"
+    percent=$((current * 100 / total_files))
+    echo "$percent" >&3
+    continue
+  fi
 
   process_file_build_only "$file"
 
   debug "FFMPEG CMD: ffmpeg -y ${ffmpeg_args[*]} \"$output\""
 
-  ########################################
-  # RUN FFMPEG (BATCH CONTROLLED)
-  ########################################
-
-  ffmpeg -y "${ffmpeg_args[@]}" "$output" > >(tee -a "$DEBUG_LOG") 2>&1 &
-  FFMPEG_PID=$!
-
-  while kill -0 "$FFMPEG_PID" 2>/dev/null; do
-
-    # GLOBAL CANCEL
-    if ! kill -0 "$ZENITY_PID" 2>#!/usr/bin/env bash
-
-DEBUG=0 # change value to 1 to enable debugging or 0 to disable it
-DEBUG_LOG="/tmp/video_convert_debug.log"
-
-debug() {
+  ERRLOG=$(mktemp)
   if [[ "$DEBUG" -eq 1 ]]; then
-    echo "[DEBUG] $*" | tee -a "$DEBUG_LOG"
-  fi
-}
-
-MODE="auto"
-
-if [[ $# -lt 1 ]]; then
-  zenity --error --text="Usage: $0 <file-or-directory> [more files/dirs...]"
-  exit 1
-fi
-
-########################################
-# CHECK VAAPI
-########################################
-
-VAAPI_AVAILABLE=0
-if command -v vainfo >/dev/null 2>&1; then
-  if vainfo 2>/dev/null | grep -q "VAEntrypointEncSlice"; then
-    VAAPI_AVAILABLE=1
-  fi
-fi
-
-VAAPI_AV1_AVAILABLE=0
-if [[ "$VAAPI_AVAILABLE" -eq 1 ]]; then
-  if ffmpeg -hide_banner -encoders 2>/dev/null | grep -q "av1_vaapi"; then
-    VAAPI_AV1_AVAILABLE=1
-  fi
-fi
-
-debug "VAAPI=$VAAPI_AVAILABLE AV1_VAAPI=$VAAPI_AV1_AVAILABLE"
-
-########################################
-# FILE COLLECTION
-########################################
-
-files=()
-
-for input in "$@"; do
-  if [[ -d "$input" ]]; then
-    while IFS= read -r f; do
-      files+=("$f")
-    done < <(find "$input" -type f \( \
-      -iname "*.mp4" -o \
-      -iname "*.mkv" -o \
-      -iname "*.mov" -o \
-      -iname "*.avi" \
-    \))
+    ffmpeg -y "${ffmpeg_args[@]}" "$output" > >(tee -a "$DEBUG_LOG") 2>&1 &
   else
-    files+=("$input")
+    ffmpeg -y "${ffmpeg_args[@]}" "$output" > "$ERRLOG" 2>&1 &
   fi
-done
-
-########################################
-# DETECT IF STREAM IS "UNUSUAL"
-########################################
-
-is_unusual_stream() {
-  local input="$1"
-  local stream_index="$2"
-
-  # Get codec for this specific stream
-  local codec=$(ffprobe -v error -select_streams "v:${stream_index}" \
-    -show_entries stream=codec_name \
-    -of default=nokey=1:noprint_wrappers=1 "$input")
-
-  debug "Stream v:$stream_index codec=$codec"
-
-  # Only mark MJPEG as unusual (these are typically attached pictures/thumbnails)
-  if [[ "$codec" == "mjpeg" ]]; then
-    return 0  # is unusual
-  fi
-
-  return 1  # is normal
-}
-
-########################################
-# RUN WITH PROGRESS (FIFO VERSION)
-########################################
-
-run_with_progress() {
-  local title="$1"
-  local output_file="$2"
-  shift 2
-
-  local cmd=("$@")
-
-  ########################################
-  # FIFO SETUP (CRITICAL FIX)
-  ########################################
-
-  FIFO=$(mktemp -u)
-  mkfifo "$FIFO"
-
-  zenity --progress \
-    --title="$title" \
-    --auto-close \
-    --cancel-label="Cancel" \
-    --text="Converting..." \
-    < "$FIFO" &
-
-  ZENITY_PID=$!
-  exec 3> "$FIFO"
-  rm -f "$FIFO"
-
-  debug "Zenity PID=$ZENITY_PID"
-
-  ########################################
-  # RUN FFMPEG
-  ########################################
-
-  # run ffmpeg and capture REAL pid
-  "${cmd[@]}" > >(tee -a "$DEBUG_LOG") 2>&1 &
-  ffmpeg_pid=$!
-
-  debug "ffmpeg PID=$ffmpeg_pid"
-
-  ########################################
-  # MONITOR LOOP
-  ########################################
-
-  while kill -0 "$ffmpeg_pid" 2>/dev/null; do
-
-    # CANCEL DETECTED
-    if ! kill -0 "$ZENITY_PID" 2>/dev/null; then
-      debug "Cancel detected"
-
-      kill -TERM "$ffmpeg_pid" 2>/dev/null
-      sleep 0.2
-      kill -KILL "$ffmpeg_pid" 2>/dev/null
-      wait "$ffmpeg_pid" 2>/dev/null
-
-      [[ -f "$output_file" ]] && rm -f "$output_file"
-
-      exec 3>&-
-
-      zenity --warning \
-        --title="Conversion Cancelled" \
-        --text="The conversion was cancelled and partial output was removed."
-
-      return 1
-    fi
-
-    echo "# Converting..." >&3
-    sleep 0.5
-  done
-
-  wait "$ffmpeg_pid"
-  local exit_code=$?
-
-  exec 3>&-
-  wait "$ZENITY_PID" 2>/dev/null
-
-  if [[ "$exit_code" -eq 0 ]]; then
-    zenity --info --title="Complete" --text="Conversion Complete!"
-    return 0
-  else
-    [[ -f "$output_file" ]] && rm -f "$output_file"
-
-    zenity --error --title="Error" --text="Conversion failed or was interrupted."
-    return 1
-  fi
-}
-
-########################################
-# PROCESS FILE (BUILD FFMPEG ARGS)
-########################################
-
-process_file_build_only() {
-  local input="$1"
-
-  # Get main video codec
-  local video_codec=$(ffprobe -v error -select_streams v:0 \
-    -show_entries stream=codec_name \
-    -of default=nokey=1:noprint_wrappers=1 "$input")
-
-  # Get all audio codecs
-  mapfile -t audio_codecs < <(
-    ffprobe -v error -select_streams a \
-      -show_entries stream=codec_name \
-      -of default=nokey=1:noprint_wrappers=1 "$input"
-  )
-
-  # Count total video streams
-  local video_stream_count=$(ffprobe -v error -select_streams v \
-    -show_entries stream=index \
-    -of default=nokey=1:noprint_wrappers=1 "$input" | wc -l)
-
-  ffmpeg_args=(-i "$input")
-
-  ########################################
-  # MAP STREAMS (EXPLICIT)
-  ########################################
-
-  # Map video streams individually with smart codec selection
-  for ((i = 0; i < video_stream_count; i++)); do
-    ffmpeg_args+=(-map "0:v:$i")
-  done
-
-  # Map audio streams
-  ffmpeg_args+=(-map 0:a?)
-
-  # Map subtitle streams
-  ffmpeg_args+=(-map 0:s?)
-
-  ########################################
-  # VIDEO CODEC LOGIC (PER STREAM)
-  ########################################
-
-  # Process each video stream
-  for ((i = 0; i < video_stream_count; i++)); do
-    if is_unusual_stream "$input" "$i"; then
-      debug "Stream v:$i is unusual - copying without encoding"
-      ffmpeg_args+=(-c:v:$i copy)
-    else
-      # Normal stream - apply encoding logic
-      if [[ "$video_codec" == "av1" ]]; then
-        ffmpeg_args+=(-c:v:$i copy)
-      else
-        if [[ "$VAAPI_AV1_AVAILABLE" -eq 1 ]]; then
-          # VAAPI logic - need to apply filter only to first stream
-          if [[ $i -eq 0 ]]; then
-            ffmpeg_args+=(
-              -vaapi_device /dev/dri/renderD128
-              -vf format=nv12,hwupload
-              -c:v:$i av1_vaapi
-              -rc_mode VBR
-              -qp 20
-            )
-          else
-            # Subsequent streams: copy or use CPU encoder
-            ffmpeg_args+=(-c:v:$i libsvtav1 -preset 6 -crf 24)
-          fi
-        else
-          ffmpeg_args+=(-c:v:$i libsvtav1 -preset 6 -crf 24)
-        fi
-      fi
-    fi
-  done
-
-  ########################################
-  # AUDIO HANDLING
-  ########################################
-
-  audio_index=0
-  for codec in "${audio_codecs[@]}"; do
-    stream="a:${audio_index}"
-
-    case "$codec" in
-      flac|pcm*|alac)
-        ffmpeg_args+=(-c:$stream copy)
-        ;;
-      *)
-        ffmpeg_args+=(-c:$stream flac -compression_level 5)
-        ;;
-    esac
-
-    ((audio_index++))
-  done
-}
-
-########################################
-# ZENITY SETUP (BATCH MODE)
-########################################
-
-total_files=${#files[@]}
-current=0
-any_failed=0
-
-FIFO=$(mktemp -u)
-mkfifo "$FIFO"
-
-zenity --progress \
-  --title="Video Conversion" \
-  --percentage=0 \
-  --auto-close < "$FIFO" &
-
-ZENITY_PID=$!
-exec 3> "$FIFO"
-rm "$FIFO"
-
-debug "Zenity PID=$ZENITY_PID batch size=$total_files"
-
-########################################
-# MAIN LOOP
-########################################
-
-for file in "${files[@]}"; do
-  current=$((current + 1))
-
-  filename=$(basename "$file")
-
-  echo "# Converting ($current/$total_files)\n$filename" >&3
-
-  ########################################
-  # BUILD COMMAND
-  ########################################
-
-  output="${file%.*}_${file##*.}_resolve.mkv"
-
-  process_file_build_only "$file"
-
-  debug "FFMPEG CMD: ffmpeg -y ${ffmpeg_args[*]} \"$output\""
-
-  ########################################
-  # RUN FFMPEG (BATCH CONTROLLED)
-  ########################################
-
-  ffmpeg -y "${ffmpeg_args[@]}" "$output" > >(tee -a "$DEBUG_LOG") 2>&1 &
   FFMPEG_PID=$!
 
   while kill -0 "$FFMPEG_PID" 2>/dev/null; do
@@ -655,6 +221,7 @@ for file in "${files[@]}"; do
       kill -KILL "$FFMPEG_PID" 2>/dev/null
       wait "$FFMPEG_PID" 2>/dev/null
       rm -f "$output"
+      rm -f "$ERRLOG"
 
       exec 3>&-
       zenity --warning --text="Conversion cancelled."
@@ -670,66 +237,14 @@ for file in "${files[@]}"; do
   if [[ $status -ne 0 ]]; then
     any_failed=1
     debug "Failed: $file"
+    {
+      echo "===== FAILED: $file ====="
+      cat "$ERRLOG"
+    } >> "$DEBUG_LOG"
   fi
+  rm -f "$ERRLOG"
 
-  ########################################
   # UPDATE PROGRESS BAR
-  ########################################
-
-  percent=$((current * 100 / total_files))
-  echo "$percent" >&3
-done
-
-########################################
-# CLEANUP
-########################################
-
-exec 3>&-
-wait "$ZENITY_PID" 2>/dev/null
-
-if [[ $any_failed -eq 1 ]]; then
-  zenity --warning --text="Some conversions failed."
-else
-  zenity --info --text="Conversion complete."
-fi
-/dev/null; then
-      debug "Batch cancel detected"
-
-      kill -TERM "$FFMPEG_PID" 2>/dev/null
-
-      # give ffmpeg time to exit cleanly
-      for i in {1..10}; do
-        if ! kill -0 "$FFMPEG_PID" 2>/dev/null; then
-          break
-        fi
-        sleep 0.1
-      done
-
-      # fallback ONLY if still alive
-      kill -KILL "$FFMPEG_PID" 2>/dev/null
-      wait "$FFMPEG_PID" 2>/dev/null
-      rm -f "$output"
-
-      exec 3>&-
-      zenity --warning --text="Conversion cancelled."
-      exit 1
-    fi
-
-    sleep 0.2
-  done
-
-  wait "$FFMPEG_PID"
-  status=$?
-
-  if [[ $status -ne 0 ]]; then
-    any_failed=1
-    debug "Failed: $file"
-  fi
-
-  ########################################
-  # UPDATE PROGRESS BAR
-  ########################################
-
   percent=$((current * 100 / total_files))
   echo "$percent" >&3
 done
