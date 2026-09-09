@@ -40,9 +40,10 @@ Multi stream audio is supported, all streams will either be converted to flac or
 Your original file will never be overwritten, however subsequent conversions of the same file may cause overwrites of the previous conversion.
 
 ## Upcoming Features
-Major:
 
-`Add passthrough for other already resolve compatible codecs (DNxHR, pcm, etc.)`
+Add passthrough for other already resolve compatible codecs (DNxHR, pcm, etc.)
+
+Add UX pointing user to dumped logs if the log is printed due to a failed conversion.
 
 ## Disclaimers
 
