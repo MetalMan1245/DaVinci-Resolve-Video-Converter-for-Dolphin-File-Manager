@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-DEBUG=0 # change value to 1 to enable debugging or 0 to disable it
+DEBUG=1 # change value to 1 to enable debugging or 0 to disable it
 DEBUG_LOG="/tmp/video_convert_debug.log"
 
 debug() {
@@ -8,6 +8,22 @@ debug() {
     echo "[DEBUG] $*" | tee -a "$DEBUG_LOG"
   fi
 }
+
+########################################
+# ENCODER TUNING
+########################################
+
+# VAAPI AV1 target bitrate, as a percentage of the source video bitrate.
+# 100 = match the source. Raise to 130-150 if you see banding in graded HDR.
+VAAPI_TARGET_PERCENT=100
+
+# Clamps (kbps) so an unusual source can't produce an absurd target.
+# Lower VAAPI_MIN_KBPS if you ever process low-bitrate / sub-4K material.
+VAAPI_MIN_KBPS=8000
+VAAPI_MAX_KBPS=80000
+
+# Used only when the container reports no per-stream video bitrate.
+VAAPI_FALLBACK_KBPS=25000
 
 if [[ $# -lt 1 ]]; then
   zenity --error --text="Usage: $0 <file-or-directory> [more files/dirs...]"
@@ -31,6 +47,39 @@ if [[ "$VAAPI_AVAILABLE" -eq 1 ]]; then
     VAAPI_AV1_AVAILABLE=1
   fi
 fi
+
+FFMPEG_DECODERS=$(ffmpeg -hide_banner -decoders 2>/dev/null)
+
+codec_has_decoder() {
+  local codec="$1"
+  [[ -z "$codec" ]] && return 1
+  case "$codec" in
+    flac|pcm*|alac) return 0 ;;
+    *)
+      printf '%s\n' "$FFMPEG_DECODERS" | grep -qw "$codec"
+      ;;
+  esac
+}
+
+########################################
+# CODEC CLASSIFICATION
+########################################
+
+# Video codecs copied straight into Matroska instead of being re-encoded.
+# Membership requires BOTH that the Matroska muxer accepts the codec and that
+# Resolve reads it natively. Intra-frame editing codecs (ProRes, DNxHR,
+# CineForm) are here because re-encoding a mezzanine to AV1 discards quality
+# for no gain. ffmpeg reports DNxHD and DNxHR alike as "dnxhd".
+MKV_PASSTHROUGH_VIDEO="mjpeg png av1 prores dnxhd cfhd rawvideo v210 r210"
+
+video_passthrough_ok() {
+  local codec="$1" c
+  [[ -z "$codec" ]] && return 1
+  for c in $MKV_PASSTHROUGH_VIDEO; do
+    [[ "$codec" == "$c" ]] && return 0
+  done
+  return 1
+}
 
 debug "VAAPI=$VAAPI_AVAILABLE AV1_VAAPI=$VAAPI_AV1_AVAILABLE"
 
@@ -64,7 +113,7 @@ done
 process_file_build_only() {
   local input="$1"
 
-  local -A st_type=() st_name=()
+  local -A st_type=() st_name=() st_pix=() st_fps=() st_bitrate=()
   local -a idx_list=()
 
   # One authoritative dump, filtered to top-level streams only
@@ -86,12 +135,27 @@ process_file_build_only() {
         idx="${idx%.codec_name}"
         st_name[$idx]="$val"
         ;;
+      streams.stream.*.pix_fmt)
+        idx="${key#streams.stream.}"
+        idx="${idx%.pix_fmt}"
+        st_pix[$idx]="$val"
+        ;;
+      streams.stream.*.avg_frame_rate)
+        idx="${key#streams.stream.}"
+        idx="${idx%.avg_frame_rate}"
+        st_fps[$idx]="$val"
+        ;;
+      streams.stream.*.bit_rate)
+        idx="${key#streams.stream.}"
+        idx="${idx%.bit_rate}"
+        st_bitrate[$idx]="$val"
+        ;;
       *) ;;   # skips programs.program.* and stream_groups.* entirely
     esac
-  done < <(ffprobe -v error -of flat -show_entries stream=index,codec_type,codec_name "$input")
+  done < <(ffprobe -v error -of flat -show_entries stream=index,codec_type,codec_name,pix_fmt,avg_frame_rate,bit_rate "$input")
 
   # Walk streams in ascending index order
-  local video_indices=() video_codecs=()
+  local video_indices=() video_codecs=() video_pixfmts=() video_fps=() video_bitrates=()
   local audio_indices=() audio_codecs=()
   local idx sorted
   while IFS= read -r idx; do
@@ -101,6 +165,9 @@ process_file_build_only() {
         [[ -z "${st_name[$idx]}" ]] && continue   # tmcd / data pseudo-streams
         video_indices+=("$idx")
         video_codecs+=("${st_name[$idx]}")
+        video_pixfmts+=("${st_pix[$idx]:-}")
+        video_fps+=("${st_fps[$idx]:-}")
+        video_bitrates+=("${st_bitrate[$idx]:-}")
         ;;
       audio)
         audio_indices+=("$idx")
@@ -117,29 +184,70 @@ process_file_build_only() {
   for idx in "${video_indices[@]}"; do
     ffmpeg_args+=(-map "0:$idx")
   done
-  ffmpeg_args+=(-map 0:a? -map 0:s? -c:s copy)
+  ffmpeg_args+=(-map 0:s? -c:s copy)
 
-  local o=0 codec
-  for codec in "${video_codecs[@]}"; do
-    if [[ "$codec" == "mjpeg" || "$codec" == "png" || "$codec" == "av1" ]]; then
-      debug "Output v:$o ($codec) - passthrough"
+  local o=0 codec vi fps_num fps_den fps_val
+  for vi in "${!video_codecs[@]}"; do
+    codec="${video_codecs[$vi]}"
+    if video_passthrough_ok "$codec"; then
+      debug "Output v:$o ($codec) - passthrough (MKV-safe, Resolve-native)"
       ffmpeg_args+=(-c:v:$o copy)
-    elif [[ "$VAAPI_AV1_AVAILABLE" -eq 1 && $o -eq 0 ]]; then
-      ffmpeg_args+=(
-        -vaapi_device /dev/dri/renderD128
-        -filter:v:0 format=nv12,hwupload
-        -c:v:$o av1_vaapi
-        -rc_mode VBR
-        -qp 20
-      )
     else
-      ffmpeg_args+=(-c:v:$o libsvtav1 -preset 6 -crf 24)
+      fps_val=0
+      fps_num="${video_fps[$vi]%%/*}"
+      fps_den="${video_fps[$vi]##*/}"
+      if [[ "$fps_num" =~ ^[0-9]+$ && "$fps_den" =~ ^[0-9]+$ && "$fps_den" -gt 0 ]]; then
+        fps_val=$((fps_num * 100 / fps_den))
+      fi
+      if [[ "$VAAPI_AV1_AVAILABLE" -eq 1 && $o -eq 0 && $fps_val -le 6000 ]]; then
+        local hw_fmt=nv12
+        case "${video_pixfmts[$vi]:-}" in
+          yuv420p10le|p010le) hw_fmt=p010le ;;
+        esac
+        local src_kbps=0 target_kbps maxrate_kbps bufsize_kbps
+        if [[ "${video_bitrates[$vi]:-}" =~ ^[0-9]+$ ]]; then
+          src_kbps=$(( ${video_bitrates[$vi]} / 1000 ))
+        fi
+        [[ "$src_kbps" -le 0 ]] && src_kbps=$VAAPI_FALLBACK_KBPS
+        target_kbps=$(( src_kbps * VAAPI_TARGET_PERCENT / 100 ))
+        [[ "$target_kbps" -lt "$VAAPI_MIN_KBPS" ]] && target_kbps=$VAAPI_MIN_KBPS
+        [[ "$target_kbps" -gt "$VAAPI_MAX_KBPS" ]] && target_kbps=$VAAPI_MAX_KBPS
+        maxrate_kbps=$(( target_kbps * 130 / 100 ))
+        bufsize_kbps=$(( target_kbps * 160 / 100 ))
+        debug "Output v:$o ($codec, ${fps_val}fps, ${video_pixfmts[$vi]:-unknown pix}, src ${src_kbps}k) - VAAPI AV1 as $hw_fmt, target ${target_kbps}k"
+        ffmpeg_args+=(
+          -vaapi_device /dev/dri/renderD128
+          -filter:v:0 "format=${hw_fmt},hwupload"
+          -c:v:$o av1_vaapi
+          -rc_mode VBR
+          -b:v:$o "${target_kbps}k"
+          -maxrate:v:$o "${maxrate_kbps}k"
+          -bufsize:v:$o "${bufsize_kbps}k"
+        )
+      else
+        debug "Output v:$o ($codec, ${fps_val}fps) - CPU libsvtav1 preset 4 (high-fps or no VAAPI fallback)"
+        ffmpeg_args+=(
+          -c:v:$o libsvtav1
+          -preset 4
+          -crf 20
+          -threads 0
+          -svtav1-params row-mt=1:tune=0
+        )
+      fi
     fi
     ((o++))
   done
 
   o=0
-  for codec in "${audio_codecs[@]}"; do
+  local ai
+  for ai in "${!audio_indices[@]}"; do
+    idx="${audio_indices[$ai]}"
+    codec="${audio_codecs[$ai]}"
+    if ! codec_has_decoder "$codec"; then
+      debug "Skipping audio 0:$idx ($codec) - no decoder available"
+      continue
+    fi
+    ffmpeg_args+=(-map "0:$idx")
     case "$codec" in
       flac|pcm*|alac) ffmpeg_args+=(-c:a:$o copy) ;;
       *)              ffmpeg_args+=(-c:a:$o flac -compression_level 5) ;;

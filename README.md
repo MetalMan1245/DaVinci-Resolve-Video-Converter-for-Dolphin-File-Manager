@@ -23,13 +23,13 @@ For a manual install:
 
 ## Use
 
-Right-click file in Dolphin -> Convert for Resolve.  You will be prompted to choose Auto (recommended), force VAAPI (fast), or force CPU (SVT-AV1 quality).  Auto will choose VAAPI if it is available and fall back to CPU encoding if not.
+Right-click file in Dolphin -> Convert for Resolve.
 
 You may also run `~/.local/bin/ResolveConvert.sh /path/to/your/file` to run the script manually without Dolphin.
 
 ## Notes
 
-For a more general purpose converter see `https://github.com/MetalMan1245/dolphin-context-convert-davinci` (the reason this isn't forked from that is because I got frustrated working with someone else's code and bolting on a different tool to an already existing thing that was messy to begin with)  Eventually I will remove the Resolve features from that so that they are located here, and that is just an improvement to the original project it is forked from `https://github.com/NuVanDibe/dolphin-context-convert`
+For a more general purpose converter see `https://github.com/MetalMan1245/dolphin-context-convert-davinci` that is just an improvement to the original project it is forked from `https://github.com/NuVanDibe/dolphin-context-convert`
 
 Video will be passed through if it is already AV1, audio will be passed through if it is already flac, and `originalfilename_originalextension_converted.mkv` will be generated in the same directory as your file.
 
@@ -41,12 +41,10 @@ Your original file will never be overwritten, however subsequent conversions of 
 
 ## Upcoming Features
 
-Add passthrough for other already resolve compatible codecs (DNxHR, pcm, etc.)
-
-Add UX pointing user to dumped logs if the log is printed due to a failed conversion.
+None, feel free to submit bug reports or a bug report as a feature request, but as long as it keeps working for me I'm done making changes to the script.
 
 ## Disclaimers
 
 THIS IS VIBE CODED.  I am not a real programmer and as such AI was used to create this, therefore I do not promise quality, repeatability, or robustness.
 
-That said I use this script myself to convert video from cameras as part of footage ingestion (maybe one day Blackmagic will fix the Linux build and all of this will be unnecessary) and if you think you can do better, feel free to message me here or on my discord `metalman1245` or fork if you would rather create your own project.  Though I personally hate fragmentation, so I would much rather you just get in contact with me and I will add you to this repo so you can push changes yourself.
+That said I use this script myself to convert video from cameras as part of footage ingestion (maybe one day Blackmagic will fix the Linux build and all of this will be unnecessary) and if you think you can do better, feel free to message me on my website https://sc2.sarl or fork if you would rather create your own project.  Though I personally hate fragmentation, so I would much rather you just get in contact with me and I will add you to this repo so you can push changes yourself.
